@@ -1,0 +1,1 @@
+{"class":"org.apache.spark.ml.feature.VectorAssembler","timestamp":1790882754804,"sparkVersion":"4.0.0","uid":"VectorAssembler_e554be2fcbfa","paramMap":{"outputCol":"features","inputCols":["hour","dow","latitude","longitude","congestion","at_stop","prev_delay","line_vec"]},"defaultParamMap":{"outputCol":"VectorAssembler_e554be2fcbfa__output","handleInvalid":"error"}}

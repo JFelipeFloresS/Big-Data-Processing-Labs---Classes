@@ -1,0 +1,9 @@
+8 7
+o o o o o o o
+o o x o o o o
+o o x o o o o
+o o x o o o o
+o o o o o x x
+o o o o o x x
+o o o o o x x
+o o o o o x x
