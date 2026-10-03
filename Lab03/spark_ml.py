@@ -1,4 +1,8 @@
-"""Train a random forest to predict Dublin bus delays with Spark ML."""
+"""Train two random forests to predict Dublin bus delays with Spark ML.
+
+- Structural model: time, place and line only. Used by structural_delays.py.
+- Live model: also uses the vehicle's previous delay. Used for live prediction.
+"""
 from pyspark.sql import SparkSession, functions as F
 from pyspark.ml import Pipeline
 from pyspark.ml.feature import StringIndexer, OneHotEncoder, VectorAssembler
@@ -6,10 +10,10 @@ from pyspark.ml.regression import RandomForestRegressor
 from pyspark.ml.evaluation import RegressionEvaluator
 
 from bus_features import (load_bus_data, add_features, add_lag_features,
-                          FEATURE_COLS)
+                          STRUCTURAL_FEATURE_COLS, LIVE_FEATURE_COLS,
+                          STRUCTURAL_MODEL_PATH, LIVE_MODEL_PATH)
 
 DATA_PATH = "../Lab02/my_dataset_complete_31_files/"
-MODEL_PATH = "/home/Lab03/bus_delay_model"
 SAMPLE_FRACTION = 0.1   # set to None for the final run on the full month
 
 spark = (SparkSession.builder
@@ -19,68 +23,70 @@ spark = (SparkSession.builder
          .getOrCreate())
 spark.sparkContext.setLogLevel("WARN")
 
-# ---------------------------------------------------------------------------
-# Data and features
-# ---------------------------------------------------------------------------
-df = load_bus_data(spark, DATA_PATH)
-
-# Label must be present for training; lag is computed before sampling so
-# each vehicle's consecutive pings are still together.
-df2 = add_lag_features(add_features(df).dropna(subset=["delay"]))
-
-if SAMPLE_FRACTION:
-    df2 = df2.sample(fraction=SAMPLE_FRACTION, seed=42)
-
-# Time-based split: train on Jan 1-24, test on Jan 25-31 (a full week)
-train = df2.filter(F.col("day") <= 24).cache()
-test = df2.filter(F.col("day") > 24)
-
-# ---------------------------------------------------------------------------
-# Pipeline
-# ---------------------------------------------------------------------------
-indexer = StringIndexer(inputCol="bus_line", outputCol="line_idx",
-                        handleInvalid="keep")
-encoder = OneHotEncoder(inputCols=["line_idx"], outputCols=["line_vec"])
-assembler = VectorAssembler(inputCols=FEATURE_COLS, outputCol="features")
-rf = RandomForestRegressor(featuresCol="features", labelCol="delay",
-                           numTrees=20, maxDepth=8, seed=42)
-
-pipeline = Pipeline(stages=[indexer, encoder, assembler, rf])
-model = pipeline.fit(train)
-
-# ---------------------------------------------------------------------------
-# Evaluation
-# ---------------------------------------------------------------------------
-preds = model.transform(test)
 evaluator = RegressionEvaluator(labelCol="delay", predictionCol="prediction")
 
-rmse = evaluator.evaluate(preds, {evaluator.metricName: "rmse"})
-mae = evaluator.evaluate(preds, {evaluator.metricName: "mae"})
 
-# Baseline 1: always predict the training mean
-mean_delay = train.agg(F.avg("delay")).first()[0]
-base_mean = test.withColumn("prediction", F.lit(mean_delay))
-mean_rmse = evaluator.evaluate(base_mean, {evaluator.metricName: "rmse"})
+def rmse_of(df):
+    return evaluator.evaluate(df, {evaluator.metricName: "rmse"})
 
-# Baseline 2: predict that the delay stays what it was at the last ping
-base_prev = test.withColumn("prediction", F.col("prev_delay").cast("double"))
-prev_rmse = evaluator.evaluate(base_prev, {evaluator.metricName: "rmse"})
 
-print(f"Model RMSE:                  {rmse/60:.2f} min")
-print(f"Model MAE:                   {mae/60:.2f} min")
-print(f"Baseline RMSE (mean delay):  {mean_rmse/60:.2f} min")
-print(f"Baseline RMSE (prev delay):  {prev_rmse/60:.2f} min")
+def build_pipeline(feature_cols):
+    indexer = StringIndexer(inputCol="bus_line", outputCol="line_idx",
+                            handleInvalid="keep")
+    encoder = OneHotEncoder(inputCols=["line_idx"], outputCols=["line_vec"])
+    assembler = VectorAssembler(inputCols=feature_cols, outputCol="features")
+    rf = RandomForestRegressor(featuresCol="features", labelCol="delay",
+                               numTrees=20, maxDepth=8, seed=42)
+    return Pipeline(stages=[indexer, encoder, assembler, rf])
 
-# Which features the forest relied on most (line_vec is expanded into one
-# slot per bus line, so it's summed into a single figure here)
-importances = model.stages[-1].featureImportances.toArray()
-n_scalar = len(FEATURE_COLS) - 1
-print("\nFeature importances:")
-for name, value in zip(FEATURE_COLS[:n_scalar], importances[:n_scalar]):
-    print(f"  {name:12s} {value:.3f}")
-print(f"  {'bus_line':12s} {importances[n_scalar:].sum():.3f}")
 
-model.write().overwrite().save(MODEL_PATH)
-print(f"\nModel saved to {MODEL_PATH}")
+def train_and_evaluate(name, data, feature_cols, model_path):
+    print(f"\n=== {name} model ===")
+    if SAMPLE_FRACTION:
+        data = data.sample(fraction=SAMPLE_FRACTION, seed=42)
+
+    # Time-based split: train on Jan 1-24, test on Jan 25-31 (a full week)
+    train = data.filter(F.col("day") <= 24).cache()
+    test = data.filter(F.col("day") > 24)
+
+    model = build_pipeline(feature_cols).fit(train)
+    preds = model.transform(test)
+
+    mae = evaluator.evaluate(preds, {evaluator.metricName: "mae"})
+    print(f"Model RMSE:                  {rmse_of(preds)/60:.2f} min")
+    print(f"Model MAE:                   {mae/60:.2f} min")
+
+    mean_delay = train.agg(F.avg("delay")).first()[0]
+    base_mean = test.withColumn("prediction", F.lit(mean_delay))
+    print(f"Baseline RMSE (mean delay):  {rmse_of(base_mean)/60:.2f} min")
+
+    if "prev_delay" in feature_cols:
+        base_prev = test.withColumn("prediction",
+                                    F.col("prev_delay").cast("double"))
+        print(f"Baseline RMSE (prev delay):  {rmse_of(base_prev)/60:.2f} min")
+
+    # line_vec is the last feature and expands to one slot per bus line,
+    # so its slots are summed into a single bus_line figure
+    importances = model.stages[-1].featureImportances.toArray()
+    n_scalar = len(feature_cols) - 1
+    print("Feature importances:")
+    for col, value in zip(feature_cols[:n_scalar], importances[:n_scalar]):
+        print(f"  {col:12s} {value:.3f}")
+    print(f"  {'bus_line':12s} {importances[n_scalar:].sum():.3f}")
+
+    model.write().overwrite().save(model_path)
+    print(f"Saved to {model_path}")
+    train.unpersist()
+
+
+base = add_features(load_bus_data(spark, DATA_PATH)).dropna(subset=["delay"])
+
+# Structural model: no lag, so every ping with a known delay is usable
+train_and_evaluate("Structural", base, STRUCTURAL_FEATURE_COLS,
+                   STRUCTURAL_MODEL_PATH)
+
+# Live model: lag computed on the full data, before any sampling
+train_and_evaluate("Live", add_lag_features(base), LIVE_FEATURE_COLS,
+                   LIVE_MODEL_PATH)
 
 spark.stop()

@@ -10,9 +10,21 @@ COLUMNS = ["date", "bus_line", "bus_line_pattern", "congestion",
            "longitude", "latitude", "delay", "vehicle_id",
            "closer_stop", "at_stop"]
 
-# Columns fed into the VectorAssembler (line_vec is produced by the pipeline)
-FEATURE_COLS = ["hour", "dow", "latitude", "longitude",
-                "congestion", "at_stop", "prev_delay", "line_vec"]
+# Columns fed into the VectorAssembler (line_vec is produced by the pipeline).
+# line_vec must stay last: the importance printout relies on it.
+
+# Structural model: only time, place and line. Its predictions estimate the
+# typical delay for a context, which is what structural analysis needs.
+STRUCTURAL_FEATURE_COLS = ["hour", "dow", "latitude", "longitude",
+                           "congestion", "at_stop", "line_vec"]
+
+# Live model: adds the vehicle's delay at its previous ping, for predicting
+# the delay of a bus that is already on the road.
+LIVE_FEATURE_COLS = ["hour", "dow", "latitude", "longitude",
+                     "congestion", "at_stop", "prev_delay", "line_vec"]
+
+STRUCTURAL_MODEL_PATH = "/home/Lab03/bus_delay_model_structural"
+LIVE_MODEL_PATH = "/home/Lab03/bus_delay_model_live"
 
 
 def load_bus_data(spark, path):
